@@ -1,0 +1,43 @@
+#!/usr/bin/env ruby
+
+$LOAD_PATH.unshift("#{__dir__}/../lib")
+
+require 'pubsub_worker'
+require 'optparse/kwargs'
+
+opts = {
+  require: './config/environment'
+}
+
+parser = OptionParser.new
+
+parser.on '--[no-]require=PATH' do |v|
+  opts[:require] = v
+end
+
+worker_args = parser.define_by_keywords(
+  {},
+  PubsubWorker::Base.instance_method(:initialize),
+  {}
+)
+
+pubsub_args = parser.define_by_keywords(
+  {},
+  Google::Cloud::Pubsub.method(:new),
+  {
+    scope:   Array,
+    timeout: Integer
+  }
+)
+
+parser.parse ARGV
+
+require opts[:require] if opts[:require]
+
+pubsub = Google::Cloud::Pubsub.new(pubsub_args)
+
+begin
+  PubsubWorker::Base.new(pubsub: pubsub, **worker_args).run
+rescue Interrupt
+  exit
+end
