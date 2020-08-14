@@ -7,10 +7,12 @@ require 'logger'
 
 class PubsubWorker::Base
   class << self
-    attr_reader :message_handler
+    attr_reader :message_handlers
 
-    def register_message_handler(&handler)
-      @message_handler = handler
+    def register_message_handler(topic, &handler)
+      @message_handlers ||= {}
+      @message_handlers[topic] = handler
+
     end
 
     def topic_for(pubsub, topic_name)
@@ -23,21 +25,27 @@ class PubsubWorker::Base
     end
   end
 
-  def initialize(queue: 'default', pubsub: Google::Cloud::Pubsub.new(timeout: 60), logger: Logger.new($stdout), worker: nil)
-    @queue_name  = queue
-    @worker_name = worker || "#{queue}-worker"
+  def initialize(pubsub: Google::Cloud::Pubsub.new(timeout: 60), logger: Logger.new($stdout), topics: ['default'], subscription_suffix: 'worker')
+    @topics = topics
+    @subscription_suffix = subscription_suffix
     @pubsub      = pubsub
     @logger      = logger
   end
 
   def run
-    subscriber = self.class.subscription_for(@pubsub, @queue_name, @worker_name).listen(streams: 1, threads: { callback: 1 }) do |message|
-      @logger&.info "Message(#{message.message_id}) was received."
-      process message
-    end
+    @subscriptions = []
+    @topics.each do |topic|
+      subscription_name = "#{topic}-#{@subscription_suffix}"
+      sub = self.class.subscription_for(@pubsub, topic, subscription_name).listen(streams: 1, threads: { callback: 1 }) do |message|
+        process topic, message
+      end
 
-    subscriber.on_error do |error|
-      @logger&.error(error)
+      sub.on_error do |error|
+        @logger&.error(error)
+      end
+
+      sub.start
+      @subscriptions << sub
     end
 
     @quit = false
@@ -51,40 +59,18 @@ class PubsubWorker::Base
       @quit = true
     end
 
-    @ack_deadline = subscriber.deadline
-
-    subscriber.start
-
     sleep 1 until @quit
     @logger&.info 'Shutting down...'
-    subscriber.stop.wait!
+    @subscriptions.each { |sub| sub.stop.wait! }
     @logger&.info 'Shut down.'
   end
 
-  def ensure_subscription
-    self.class.subscription_for(@pubusb, @queue_name, @worker_name)
-    nil
-  end
-
-  private
-
-  def process(message)
-    timer_opts = {
-      # Extend ack deadline when only 10% of allowed time or 5 seconds are left, whichever comes first
-      execution_interval: [(@ack_deadline * 0.9).round, @ack_deadline - 5].min.seconds,
-      timeout_interval: 5.seconds,
-      run_now: true
-    }
-
-    delay_timer = Concurrent::TimerTask.execute(timer_opts) do
-      message.modify_ack_deadline! @ack_deadline
-    end
-
+  def process(topic, message)
     begin
       succeeded = false
       failed    = false
 
-      handler = self.class.message_handler
+      handler = self.class.message_handlers[topic]
       handler&.call(message) if handler.respond_to?(:call)
 
       succeeded = true
@@ -92,8 +78,6 @@ class PubsubWorker::Base
       failed = true
       raise
     ensure
-      delay_timer.shutdown
-
       if succeeded || failed
         message.acknowledge!
         @logger&.info "Message(#{message.message_id}) was acknowledged."

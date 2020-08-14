@@ -6,7 +6,9 @@ require 'pubsub_worker'
 require 'optparse/kwargs'
 
 opts = {
-  require: './config/environment'
+  require: './config/environment',
+  topics: ['default'],
+  suffix: 'worker'
 }
 
 parser = OptionParser.new
@@ -15,29 +17,23 @@ parser.on '--[no-]require=PATH' do |v|
   opts[:require] = v
 end
 
-worker_args = parser.define_by_keywords(
-  {},
-  PubsubWorker::Base.instance_method(:initialize),
-  {}
-)
 
-pubsub_args = parser.define_by_keywords(
-  {},
-  Google::Cloud::Pubsub.method(:new),
-  {
-    scope:   Array,
-    timeout: Integer
-  }
-)
+parser.on '--topics=topic1,topic2..' do |v|
+  opts[:topics] = v.split(',')
+end
+
+parser.on '--subscription-suffix=suffix' do |v|
+  opts[:suffix] = v
+end
 
 parser.parse ARGV
 
 require opts[:require] if opts[:require]
 
-pubsub = Google::Cloud::Pubsub.new(pubsub_args)
+pubsub = Google::Cloud::Pubsub.new
 
 begin
-  PubsubWorker::Base.new(pubsub: pubsub, **worker_args).run
+  PubsubWorker::Base.new(pubsub: pubsub, topics: opts[:topics], subscription_suffix: opts[:suffix]).run
 rescue Interrupt
   exit
 end
